@@ -1,0 +1,3 @@
+([('YTDownloader',
+   '/Users/psrg/PythonProjects/YTDownloader/dist/YTDownloader',
+   'EXECUTABLE')],)
