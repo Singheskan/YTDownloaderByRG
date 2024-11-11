@@ -2,7 +2,7 @@ import sys
 import yt_dlp
 import os
 import webbrowser
-import re  # Import the missing re module for regular expressions
+import re
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QLineEdit, QPushButton,
     QRadioButton, QHBoxLayout, QFileDialog, QComboBox, QCheckBox, QMessageBox, QProgressBar
@@ -14,7 +14,7 @@ from PyQt5.QtCore import Qt, QThread, pyqtSignal
 class DownloadWorker(QThread):
     progress = pyqtSignal(int)
     error_signal = pyqtSignal(str)
-    stop_signal = pyqtSignal()
+    finished_signal = pyqtSignal()
 
     def __init__(self, video_url, download_format, audio_format, download_folder, video_quality, is_playlist):
         super().__init__()
@@ -34,39 +34,28 @@ class DownloadWorker(QThread):
         }
 
         if self.download_format == "Audio":
-            if self.audio_format == "MP3":
-                ydl_opts.update({
-                    'format': 'bestaudio/best',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }],
-                })
-            elif self.audio_format == "AAC":
-                ydl_opts.update({
-                    'format': 'bestaudio/best',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'aac',
-                        'preferredquality': '192',
-                    }],
-                })
-            elif self.audio_format == "OGG":
-                ydl_opts.update({
-                    'format': 'bestaudio/best',
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'vorbis',
-                        'preferredquality': '192',
-                    }],
-                })
+            audio_codec = {
+                "MP3": "mp3",
+                "AAC": "aac",
+                "OGG": "vorbis"
+            }.get(self.audio_format, "mp3")
+
+            ydl_opts.update({
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': audio_codec,
+                    'preferredquality': '192',
+                }],
+                'postprocessor_args': ['-acodec', audio_codec],
+            })
         elif self.download_format == "Video":
             ydl_opts.update({'format': self.video_quality})
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 ydl.download([self.video_url])
+            self.finished_signal.emit()
         except Exception as e:
             self.error_signal.emit(str(e))
 
@@ -80,8 +69,9 @@ class DownloadWorker(QThread):
         if d['status'] == 'downloading':
             total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate')
             downloaded_bytes = d.get('downloaded_bytes')
-            percent = int(downloaded_bytes / total_bytes * 100)
-            self.progress.emit(percent)
+            if total_bytes:
+                percent = int(downloaded_bytes / total_bytes * 100)
+                self.progress.emit(percent)
 
 
 # Main Application Class
@@ -220,46 +210,30 @@ class YouTubeDownloader(QWidget):
             self.folder_display.setText("Selected Folder: Current Directory")
 
     def sanitize_url(self, video_url, is_playlist):
-        # Remove the playlist-specific query parameters if it's not a playlist download
         if not is_playlist:
-            # Remove 'list' and 'index' parameters from the URL
             video_url = re.sub(r"[&?](list|index)=[^&]+", "", video_url)
         return video_url
 
     def start_download(self):
-        # Get the video URL from the input field
         video_url = self.url_entry.text()
-
-        # Determine the selected format (Video or Audio)
         download_format = "Video" if self.video_radio.isChecked() else "Audio"
-
-        # Get the selected quality for Video or Audio format
         video_quality = self.quality_combo.currentText() if download_format == "Video" else None
         audio_format = self.audio_format_combo.currentText() if download_format == "Audio" else None
-
-        # Get the selected download folder
-        download_folder = "."  # Default is current directory
-        folder_text = self.folder_display.text().replace("Selected Folder: ", "")
-        if folder_text != "Current Directory":
-            download_folder = folder_text
-
-        # Check if it's a playlist download
+        download_folder = "." if "Current Directory" in self.folder_display.text() else self.folder_display.text().replace("Selected Folder: ", "")
         is_playlist = self.playlist_checkbox.isChecked()
 
-        # Sanitize URL: Remove playlist parameters if playlist is not selected
         video_url = self.sanitize_url(video_url, is_playlist)
 
         if not video_url.strip():
             self.show_message("Error", "Please enter a valid YouTube URL.")
             return
 
-        # Start the download in a separate thread
         self.worker = DownloadWorker(video_url, download_format, audio_format, download_folder, video_quality, is_playlist)
         self.worker.progress.connect(self.update_progress_bar)
         self.worker.error_signal.connect(self.show_error_message)
+        self.worker.finished_signal.connect(self.download_finished)
         self.worker.start()
 
-        # Enable the stop button and disable the download button
         self.stop_button.setEnabled(True)
         self.download_button.setEnabled(False)
 
@@ -269,7 +243,6 @@ class YouTubeDownloader(QWidget):
             self.status_label.setText("Download stopped.")
             self.progress_bar.setValue(0)
 
-        # Reset buttons
         self.stop_button.setEnabled(False)
         self.download_button.setEnabled(True)
 
@@ -278,19 +251,21 @@ class YouTubeDownloader(QWidget):
 
     def show_error_message(self, message):
         self.status_label.setText(f"Error: {message}")
-        self.show_message("Error", message)
+        self.stop_button.setEnabled(False)
+        self.download_button.setEnabled(True)
+
+    def download_finished(self):
+        self.download_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self.status_label.setText("Download completed.")
+        self.worker = None  # Clear the worker reference
 
     def show_message(self, title, message):
-        msg = QMessageBox()
-        msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle(title)
-        msg.setText(message)
-        msg.exec_()
+        QMessageBox.information(self, title, message)
 
 
-# Main function to run the application
-if __name__ == "__main__":
-    app = QApplication(sys.argv)
-    window = YouTubeDownloader()
-    window.show()
-    sys.exit(app.exec_())
+# Application entry point
+app = QApplication(sys.argv)
+downloader = YouTubeDownloader()
+downloader.show()
+sys.exit(app.exec_())
